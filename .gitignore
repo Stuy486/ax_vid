@@ -1,0 +1,7 @@
+vid_storage/
+saved_vid_data/
+cost_matrices/
+output_videos/
+dist/
+build/
+.DS_Store

@@ -1,0 +1,13 @@
+After python is installed, you'll also need to install the following python modules:
+
+dtw-python
+ffmpeg-python
+ultralytics
+numpy
+Pillow
+progressbar
+sklearn
+
+You should be able to pip install all of them, i.e.:
+
+pip install dtw-python ffmpeg-python ultralytics numpy Pillow progressbar sklearn
