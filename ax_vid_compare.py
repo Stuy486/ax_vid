@@ -624,7 +624,7 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
 
         # limit queue depth here just so it doesn't get super full. When the vid writer is the bottleneck, there's no use
         # having a massive queue of frames, it'll just consume a bunch of RAM and make the progressbar wrong.
-        out_vid_frame_queue = Queue(maxsize=2) 
+        out_vid_frame_queue = Queue(maxsize=5) 
         out_vid_done_event = Event()
         vid_write_thread = Thread(target=vid_write_worker, args=(out_vid_frame_queue, out_vid_done_event, vid_writer))
         vid1_frame_queue = Queue(maxsize=5)
@@ -654,8 +654,8 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
                 kf_poly_coefs = kf_poly_coefs[1:]
             a = kf_ts[0][0]
             b = kf_ts[1][0]
-            if vid1_ofs_ms > b or vid1_ofs_ms > vid1_len_ms:
             #if not success1 or not success2 or vid1_ofs_ms > b or vid1_ofs_ms > vid1_len_ms:
+            if vid1_ofs_ms > b or vid1_ofs_ms > vid1_len_ms:
                 break
             if vid1_ofs_ms < a:
                 continue
@@ -696,6 +696,10 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
             thread.start()
             prev_frame_done_event = this_frame_done_event
             last_frame_time_slip_ms = this_frame_time_slip_ms
+
+        # Make sure all the frames are in the queue before signalling completion
+        this_frame_done_event.wait()
+
         out_vid_done_event.set()
         vid1_done_event.set()
         vid2_done_event.set()
