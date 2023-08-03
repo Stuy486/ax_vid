@@ -491,8 +491,6 @@ def get_time_slip_graph(axvid1, key_frames):
     draw = ImageDraw.Draw(time_slip_graph_image)
     line_points = [(frame, image_height - int(1 + (image_height - 2) * ((time_slip - min_time_slip) / time_slip_range))) for frame, time_slip in enumerate(time_slip_data)]
     draw.line(line_points, width=3)
-    zero_points = [(frame, 0) for frame, time_slip in enumerate(time_slip_data)]
-    draw.line(zero_points, width=1)
     np_frame = np.array(list(time_slip_graph_image.getdata())).reshape(image_height,num_vid1_frames,3).astype('float32')
     return cv2.resize(np_frame, (1920, TIME_SLIP_GRAPH_HEIGHT), interpolation=cv2.INTER_AREA)
 
