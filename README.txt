@@ -11,7 +11,7 @@ couple of scripts. I needed to run two of these for this program to work:
 After python is installed (and your shell profile is updated), you should be
 able to run pip, which will install the rest of the dependencies (in a command
 prompt in Windows, or terminal in OSX):
-> python3 -m pip install dtw-python ultralytics numpy Pillow progressbar scikit-learn wxPython pytube moviepy pypubsub dill
+> python3 -m pip install -r requirements.txt
 
 If it complains that python3 isn't a command, the "Update Shell Profile" script
 didn't work properly, and you need to add python to your PATH.
