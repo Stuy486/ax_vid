@@ -7,8 +7,10 @@ import numpy as np
 import numpy.polynomial.polynomial as poly
 import icp
 import dtw
-import ffmpeg
+import moviepy.editor as mpe
 import cpuinfo
+from threading import Thread, Event
+from queue import Queue, Full, Empty
 from PIL import Image, ImageDraw, ImageFont, ImageColor
 from progressbar import Bar, ETA, ProgressBar, Percentage, RotatingMarker
 from sklearn.neighbors import NearestNeighbors
@@ -16,22 +18,30 @@ from sklearn.neighbors import NearestNeighbors
 #import pstats
 import ax_vid_video
 from ax_vid_files import paths
+import ax_vid_progress
+
+#VIDEO DIMENSIONS
+TIMING_HEIGHT = 50 # "Elapsed time: ##.##s (+/-#.###s)" just below the video
+SLIP_BAR_HEIGHT = 50 # Top half is the bar, bottom half is the text
+SLIP_TEXT_HEIGHT = 50 # Top half is the bar, bottom half is the text
+TIME_SLIP_GRAPH_HEIGHT = (1080 - 540 - TIMING_HEIGHT - SLIP_BAR_HEIGHT - SLIP_TEXT_HEIGHT) # Calculated to make a 1080p video
+COST_MATRIX_OVERLAY_SIZE = 300 # pixels
 
 #ARGUMENTS
 DATA_HZ = 30 # Frequency of cone comparison for alignment. Higher is better, but slower
 #OUTPUT CONTROL
-OUTPUT_ANNOTATED_VIDEOS = True # Output copies of the input videos, but with cones annotated
+OUTPUT_ANNOTATED_VIDEOS = False # Output copies of the input videos, but with cones annotated
 OUTPUT_TIME_SLIP_VIDEO = True # Output the side-by-side time slip video
 OUTPUT_COST_MATRICES = True # Save cost matrices (raw, w/ dtw path, w/ smoothed poly path) as images
 OUTPUT_FPS = 60 # Broken with USE_POLY_KEY_FRAME_SMOOTHING.
 #TUNABLES
 MIN_DETECTION_SCORE = 0.75 # minimum confidence level for cone detection to consider a cone
 TARGET_DTW_AVERAGE_SCORE = 220 # 255 max, lower means more "gain" in cost matrix
-COST_MATRIX_RECENTER_INTERVAL = 6 # seconds, controls how frequently we estimate time slip while calculating cost matrix
-COST_MATRIX_OVERLAY_SIZE = 200 # pixels
+COST_MATRIX_RECENTER_INTERVAL = 10 # seconds, controls how frequently we estimate time slip while calculating cost matrix
+MAX_TIME_SLIP_PER_SECOND = .3 # In seconds. Increase if speed of one run is substantially different from the other. Larger value increases cost matrix creation time
 USE_POLY_KEY_FRAME_SMOOTHING = True # Use polynomial smoothing when traversing path. Video is processed frame-by-frame rather than timestamp-to-timestamp, much faster
 KEY_FRAME_COST_THRESHOLD = 230 # 255 max, higher means fewer but more confident key frames
-MIN_KEY_FRAME_DELTA = 2.0 # seconds
+MIN_KEY_FRAME_DELTA = 1.0 # seconds
 MAX_KEY_FRAME_DELTA = 6.0 # seconds
 TARGET_CONES_PER_FRAME = 3 # number of cones. Higher will take longer to generate cost matrix, but it will be more accurate. Will not affect cone detection
 #DEBUGGING
@@ -50,7 +60,7 @@ def find_boxes_for_frame_torch(frame_np): # ([[boxes_np], [scores]], <model resu
         find_boxes_for_frame_torch.model = YOLO(os.path.join(paths['MODEL'], 'weights/best.pt'))
     
     ret = [[],[]]
-    results = find_boxes_for_frame_torch.model.predict(frame_np, verbose=False, device='cpu')
+    results = find_boxes_for_frame_torch.model.predict(frame_np, verbose=False)
     boxes = results[0].boxes.cpu().numpy()
     for box in boxes:
         ret[0].append(box.xywh[0].tolist())
@@ -194,6 +204,10 @@ def process_video(axvid): # returns (vid_id, vid_player, aud_player, [frames dat
     next_processed_frame = axvid.start_frame
     vid_player.set(cv2.CAP_PROP_POS_FRAMES, axvid.start_frame)
 
+    ax_vid_progress.StartProgress('Finding cones',
+                                  'Finding cones (%.2f fps, %d frames, %dx%d)' %
+                                  (axvid.fps, axvid.num_frames, axvid.width, axvid.height),
+                                  axvid.num_frames - axvid.start_frame)
     bar = ProgressBar(widgets=['Finding cones (%.2f fps, %d frames, %dx%d)' %
                                 (axvid.fps, axvid.num_frames, axvid.width, axvid.height),
                                Percentage(), ' ',
@@ -201,6 +215,7 @@ def process_video(axvid): # returns (vid_id, vid_player, aud_player, [frames dat
                                ETA()], maxval=axvid.num_frames - axvid.start_frame).start()
     while True:
         this_frame = axvid.start_frame + frame_num
+        ax_vid_progress.UpdateProgress(frame_num)
         bar.update(frame_num)
         if this_frame > axvid.finish_frame:
             break
@@ -222,6 +237,7 @@ def process_video(axvid): # returns (vid_id, vid_player, aud_player, [frames dat
                 vid_writer.write(results[0].plot())
 
         frame_num += 1
+    ax_vid_progress.EndProgress()
     bar.finish()
 
     average_cones_per_frame = None
@@ -297,6 +313,9 @@ def get_initial_cost_matrix(vid1_id, vid1_data, vid2_id, vid2_data):
     data2_matrix_dim = min(data2_matrix_dim, ONLY_FIRST_N)
     cost_matrix = np.ones([data1_matrix_dim,data2_matrix_dim]) * np.inf
 
+    ax_vid_progress.StartProgress('Cost matrix',
+                                  'Calculating cost matrix (%dx%d) ' % (data1_matrix_dim, data2_matrix_dim),
+                                  data1_matrix_dim)
     bar = ProgressBar(widgets=['Calculating cost matrix (%dx%d) ' % (data1_matrix_dim, data2_matrix_dim),
                                Percentage(), ' ',
                                Bar(marker=RotatingMarker()), ' ',
@@ -308,7 +327,7 @@ def get_initial_cost_matrix(vid1_id, vid1_data, vid2_id, vid2_data):
 
     max_score = 0
     data1_matrix_dim = 0
-    max_comparison_window = time_slip_check_interval / 5.0 # Allows for .2s of time slip per second
+    max_comparison_window = time_slip_check_interval / (1 / MAX_TIME_SLIP_PER_SECOND)
     comparison_window_increment = max_comparison_window / time_slip_check_interval
     current_comparison_window = DATA_HZ / 4.0
     #prof = cProfile.Profile()
@@ -316,6 +335,7 @@ def get_initial_cost_matrix(vid1_id, vid1_data, vid2_id, vid2_data):
     for data1 in vid1_data:
         if data1 == None:
             continue
+        ax_vid_progress.UpdateProgress(data1_matrix_dim + 1)
         bar.update(data1_matrix_dim + 1)
         # As we calculate the cost matrix, calculate intermediate estimated time slip
         # Use this to offset which frames we're looking at in vid2. This allows us to
@@ -362,6 +382,7 @@ def get_initial_cost_matrix(vid1_id, vid1_data, vid2_id, vid2_data):
     #stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     #stats.print_stats(50)
     
+    ax_vid_progress.EndProgress()
     bar.finish()
 
     #cost_matrix = cost_matrix[:data1_matrix_dim,:data2_offset_dim]
@@ -439,7 +460,12 @@ def get_key_frame_poly_data(key_frames): # [(vid1_ts_s, vid2_ts_s)], [coefs]
         kf_coefs[i] = poly.polyfit(x, y, len(slice) - 1)
     return kf_ts, kf_coefs
 
-def get_time_slip_data(axvid1, key_frames):
+TIMING_Y = 0 # Offset from base of middle image
+SLIP_BAR_Y = TIMING_Y + TIMING_HEIGHT
+SLIP_TEXT_Y = SLIP_BAR_Y + SLIP_BAR_HEIGHT
+SLIP_GRAPH_Y = SLIP_TEXT_Y + SLIP_TEXT_HEIGHT
+
+def get_time_slip_graph(axvid1, key_frames):
     num_vid1_frames = key_frames[-1][0]
     time_slip_data = []
     if USE_POLY_KEY_FRAME_SMOOTHING:
@@ -460,26 +486,23 @@ def get_time_slip_data(axvid1, key_frames):
     
     min_time_slip = min(time_slip_data)
     time_slip_range = max(time_slip_data) - min_time_slip
-    image_height = int(num_vid1_frames*300/1920)
+    image_height = int(num_vid1_frames*TIME_SLIP_GRAPH_HEIGHT/1920)
     time_slip_graph_image = Image.new('RGB', (num_vid1_frames,image_height), (0,0,0))
     draw = ImageDraw.Draw(time_slip_graph_image)
     line_points = [(frame, image_height - int(1 + (image_height - 2) * ((time_slip - min_time_slip) / time_slip_range))) for frame, time_slip in enumerate(time_slip_data)]
     draw.line(line_points, width=3)
     np_frame = np.array(list(time_slip_graph_image.getdata())).reshape(image_height,num_vid1_frames,3).astype('float32')
-    return cv2.resize(np_frame, (1920, 300), interpolation=cv2.INTER_AREA)
-    #for frame, time_slip in enumerate(time_slip_data):
-    #    time_slip -= min_time_slip
-    #    percentage = time_slip / time_slip_range
-    #    base = 1 + int((image_height - 2) * percentage)
-    #    draw.line((image_height - 1 - ))
+    return cv2.resize(np_frame, (1920, TIME_SLIP_GRAPH_HEIGHT), interpolation=cv2.INTER_AREA)
 
-def draw_time_slip_frame(vid_writer, frame1, frame2, total_time_slip, time_slip_since_last_frame, overlay_cm=None, graph=None, progress=None):
+def draw_time_slip_frame(out_vid_frame_queue, prev_frame_done_event, this_frame_done_event,
+                         frame1, frame2, vid1_elapsed, vid2_elapsed,
+                         total_time_slip, time_slip_since_last_frame,
+                         overlay_cm, graph, progress):
     if not hasattr(draw_time_slip_frame, "cached_font"):
         draw_time_slip_frame.cached_font = ImageFont.truetype(os.path.join(paths['FONTS'], "VollkornRegular.ttf"), size=40)
     frame1_np = cv2.resize(frame1, (960,540))
     frame2_np = cv2.resize(frame2, (960,540))
 
-    fps,_,_ = get_video_details(vid_writer)
     slip_change_magnitude = min(1, abs(time_slip_since_last_frame) * 60 / 100)
     v = 80 # percentage
     s = int(min(100, slip_change_magnitude * 100))
@@ -496,18 +519,24 @@ def draw_time_slip_frame(vid_writer, frame1, frame2, total_time_slip, time_slip_
     else:
         font_color = (200,200,200)
 
-    time_slip_bar_image = Image.new('RGB', (1920,100), (0,0,0))
+    time_slip_bar_image = Image.new('RGB', (1920, TIMING_HEIGHT + SLIP_BAR_HEIGHT + SLIP_TEXT_HEIGHT), (0,0,0))
     draw = ImageDraw.Draw(time_slip_bar_image)
+
+    draw.text((280,TIMING_Y), "Elapsed: %0.3f (%.3f)" % (vid1_elapsed / 1000.0, -total_time_slip / 1000.0),
+               font=draw_time_slip_frame.cached_font, fill=(255,255,255))
+    draw.text((1240,TIMING_Y), "Elapsed: %0.3f (%.3f)" % (vid2_elapsed / 1000.0, total_time_slip / 1000.0),
+               font=draw_time_slip_frame.cached_font, fill=(255,255,255))
+
     time_delta_mag = min(960, 960 * abs(total_time_slip/4000))
     text_x = 960
     if total_time_slip < 0:
         text_x = 960 - time_delta_mag
-        draw.rectangle([960-time_delta_mag, 0, 960, 50], fill=bar_color, width=0)
+        draw.rectangle([960-time_delta_mag, SLIP_BAR_Y, 960, SLIP_TEXT_Y], fill=bar_color, width=0)
     elif total_time_slip > 0:
         text_x = 960 + time_delta_mag
-        draw.rectangle([960, 0, 960+time_delta_mag, 50], fill=bar_color, width=0)
-    draw.text((text_x,40), "%.3f" % (total_time_slip / 1000.0), font=draw_time_slip_frame.cached_font, fill=font_color)
-    time_slip_bar_np = np.array(list(time_slip_bar_image.getdata())).reshape(100,1920,3)
+        draw.rectangle([960, SLIP_BAR_Y, 960+time_delta_mag, SLIP_TEXT_Y], fill=bar_color, width=0)
+    draw.text((text_x,SLIP_TEXT_Y - 10), "%.3f" % (total_time_slip / 1000.0), font=draw_time_slip_frame.cached_font, fill=font_color)
+    time_slip_bar_np = np.array(list(time_slip_bar_image.getdata())).reshape(TIMING_HEIGHT + SLIP_BAR_HEIGHT + SLIP_TEXT_HEIGHT,1920,3)
     time_slip_bar_np = np.uint8(time_slip_bar_np)
     # print(time_slip_bar_np.shape, np.hstack((frame1_np, frame2_np)).shape)
 
@@ -516,27 +545,65 @@ def draw_time_slip_frame(vid_writer, frame1, frame2, total_time_slip, time_slip_
         time_delta_mag = min(960, 960 * abs(total_time_slip/4000))
         frame_np = np.vstack((frame_np, np.uint8(graph)))
         play_head_center = int(1920 * progress)
-        frame_np[-300:,
+        frame_np[-TIME_SLIP_GRAPH_HEIGHT:,
                  max(0,play_head_center - 1):min(1919,play_head_center + 1),
                  :] = 255
     
     if OVERLAY_COST_MATRIX_VISUALIZATION and overlay_cm is not None:
         frame_np[:COST_MATRIX_OVERLAY_SIZE,
                  960-int(COST_MATRIX_OVERLAY_SIZE/2):960+int(COST_MATRIX_OVERLAY_SIZE/2)] = cv2.cvtColor(overlay_cm, cv2.COLOR_GRAY2RGB)
-    vid_writer.write(frame_np)
+    prev_frame_done_event.wait()
+    out_vid_frame_queue.put(frame_np)
+    this_frame_done_event.set()
+
+def vid_read_worker(frame_queue, done_event, vid_player, start_ms, start_frame):
+    cur_frame_num = start_frame
+    cur_frame = None
+    cur_ts = None
+    while not done_event.is_set():
+        if cur_frame is None:
+            cur_ts = vid_player.get(cv2.CAP_PROP_POS_MSEC) - start_ms
+            cur_frame_num += 1
+            success, cur_frame = vid_player.read()
+            if not success:
+                break
+        try:
+            frame_queue.put((cur_frame_num - 1, cur_ts, cur_frame), timeout=0.25)
+            cur_frame = None
+        except Full:
+            pass
+
+def vid_write_worker(frame_queue, done_event, vid_writer):
+    while not frame_queue.empty() or not done_event.is_set():
+        try:
+            frame = frame_queue.get(timeout=0.25)
+            vid_writer.write(frame)
+        except Empty:
+            pass
 
 def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
     vid1_player = ax_vid_video.VidPlayer(axvid1)
     vid2_player = ax_vid_video.VidPlayer(axvid2)
     output_fps = min(OUTPUT_FPS, axvid1.fps)
-    vid1_start_ms = axvid1.StartInMS()
-    vid2_start_ms = axvid2.StartInMS()
+    # Set play head to 1 frame prior to the desired start frame
+    vid1_player.set(cv2.CAP_PROP_POS_MSEC, max(0, axvid1.StartInMS() - (1000.0 / axvid1.fps)))
+    vid2_player.set(cv2.CAP_PROP_POS_MSEC, max(0, axvid2.StartInMS() - (1000.0 / axvid2.fps)))
+    # Read one frame to align player to desired start frame
+    vid1_player.read()
+    vid2_player.read()
+    vid1_start_frame = vid1_player.get(cv2.CAP_PROP_POS_FRAMES)
+    vid2_start_frame = vid2_player.get(cv2.CAP_PROP_POS_FRAMES)
+    vid1_start_ms = vid1_player.get(cv2.CAP_PROP_POS_MSEC)
+    vid2_start_ms = vid2_player.get(cv2.CAP_PROP_POS_MSEC)
     cur_vid1_ts = vid1_start_ms
     cur_vid2_ts = vid2_start_ms
     font = ImageFont.truetype(os.path.join(paths['FONTS'], "VollkornRegular.ttf"), size=40)
     
     key_frames = identify_key_frames(initial_cost_matrix)
     vid1_len_ms = (float(key_frames[-1][0]) / DATA_HZ) * 1000.0
+    ax_vid_progress.StartProgress('Creating video',
+                                  'Creating time slip video...',
+                                  vid1_len_ms)
     bar = ProgressBar(widgets=['Creating time slip video ',
                                Percentage(), ' ',
                                Bar(marker=RotatingMarker()), ' ',
@@ -552,47 +619,66 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
         vid_writer = cv2.VideoWriter(filename,
                                     cv2.VideoWriter_fourcc(*'mp4v'),
                                     axvid1.fps,
-                                    (1920,940))
+                                    (1920,1080))
         kf_ts, kf_poly_coefs = get_key_frame_poly_data(key_frames)
-        vid1_player.set(cv2.CAP_PROP_POS_MSEC, vid1_start_ms)
-        vid2_player.set(cv2.CAP_PROP_POS_MSEC, vid2_start_ms)
-        vid1_start_frame = vid1_player.get(cv2.CAP_PROP_POS_FRAMES)
-        vid2_start_frame = vid2_player.get(cv2.CAP_PROP_POS_FRAMES)
-        success2, frame2 = vid2_player.read()
+
+        # limit queue depth here just so it doesn't get super full. When the vid writer is the bottleneck, there's no use
+        # having a massive queue of frames, it'll just consume a bunch of RAM and make the progressbar wrong.
+        out_vid_frame_queue = Queue(maxsize=2) 
+        out_vid_done_event = Event()
+        vid_write_thread = Thread(target=vid_write_worker, args=(out_vid_frame_queue, out_vid_done_event, vid_writer))
+        vid1_frame_queue = Queue(maxsize=5)
+        vid1_done_event = Event()
+        vid1_read_thread = Thread(target=vid_read_worker, args=(vid1_frame_queue, vid1_done_event, vid1_player, vid1_start_ms, vid1_start_frame))
+        vid2_frame_queue = Queue(maxsize=5)
+        vid2_done_event = Event()
+        vid2_read_thread = Thread(target=vid_read_worker, args=(vid2_frame_queue, vid2_done_event, vid2_player, vid2_start_ms, vid2_start_frame))
+
+        vid_write_thread.start()
+        vid1_read_thread.start()
+        vid2_read_thread.start()
+
+        #success2, frame2 = vid2_player.read()
+        (vid2_cur_frame, vid2_ofs_ms, frame2) = vid2_frame_queue.get()
         last_frame_time_slip_ms = 0
-        graph = get_time_slip_data(axvid1, key_frames)
+        graph = get_time_slip_graph(axvid1, key_frames)
+        prev_frame_done_event = Event()
+        prev_frame_done_event.set()
         while True:
-            vid1_ofs_ms = vid1_player.get(cv2.CAP_PROP_POS_MSEC) - vid1_start_ms
-            vid2_ofs_ms = vid2_player.get(cv2.CAP_PROP_POS_MSEC) - vid2_start_ms
-            success1, frame1 = vid1_player.read()
+            (vid1_cur_frame, vid1_ofs_ms, frame1) = vid1_frame_queue.get()
+            #vid1_ofs_ms = vid1_player.get(cv2.CAP_PROP_POS_MSEC) - vid1_start_ms
+            #vid2_ofs_ms = vid2_player.get(cv2.CAP_PROP_POS_MSEC) - vid2_start_ms
+            #success1, frame1 = vid1_player.read()
             while len(kf_ts) > 2 and vid1_ofs_ms > kf_ts[1][0]:
                 kf_ts = kf_ts[1:]
                 kf_poly_coefs = kf_poly_coefs[1:]
             a = kf_ts[0][0]
             b = kf_ts[1][0]
-            if not success1 or not success2 or vid1_ofs_ms > b or vid1_ofs_ms > vid1_len_ms:
+            if vid1_ofs_ms > b or vid1_ofs_ms > vid1_len_ms:
+            #if not success1 or not success2 or vid1_ofs_ms > b or vid1_ofs_ms > vid1_len_ms:
                 break
             if vid1_ofs_ms < a:
                 continue
             # if vid1_ofs_ms > 10000:
             #     break
+            ax_vid_progress.UpdateProgress(vid1_ofs_ms)
             bar.update(vid1_ofs_ms)
             percentage = (vid1_ofs_ms - a) / (b - a)
             a_poly_val = poly.polyval(vid1_ofs_ms, kf_poly_coefs[0])
             b_poly_val = poly.polyval(vid1_ofs_ms, kf_poly_coefs[1])
             target_vid2_ofs_ms = (a_poly_val * (1 - percentage)) + (b_poly_val * percentage)
-            while success2 and vid2_ofs_ms < target_vid2_ofs_ms:
-                success2, frame2 = vid2_player.read()
-                vid2_ofs_ms = vid2_player.get(cv2.CAP_PROP_POS_MSEC) - vid2_start_ms
-            if not success1 or not success2:
-                break
+            while vid2_ofs_ms < (target_vid2_ofs_ms - (0.5 * (1 / DATA_HZ))):
+                (vid2_cur_frame, vid2_ofs_ms, frame2) = vid2_frame_queue.get()
+            #while success2 and vid2_ofs_ms < target_vid2_ofs_ms:
+                #success2, frame2 = vid2_player.read()
+                #vid2_ofs_ms = vid2_player.get(cv2.CAP_PROP_POS_MSEC) - vid2_start_ms
+            #if not success1 or not success2:
+            #    break
             this_frame_time_slip_ms = target_vid2_ofs_ms - vid1_ofs_ms
             overlay_cm = None
             if OVERLAY_COST_MATRIX_VISUALIZATION:
-                vid1_cur_frame = vid1_player.get(cv2.CAP_PROP_POS_FRAMES)
-                vid2_cur_frame = vid2_player.get(cv2.CAP_PROP_POS_FRAMES)
                 center_x = int((vid1_cur_frame - vid1_start_frame) / (axvid1.fps / DATA_HZ))
-                center_y = int((vid2_cur_frame - vid2_start_frame) / (axvid1.fps / DATA_HZ))
+                center_y = int((vid2_cur_frame - vid2_start_frame) / (axvid2.fps / DATA_HZ))
                 if center_x < pretty_matrix.shape[0] and center_y < pretty_matrix.shape[1]:
                     pretty_matrix[center_x][center_y] = 255
                 win_start_x = min(max(0, center_x - int(COST_MATRIX_OVERLAY_SIZE / 2)),
@@ -601,10 +687,21 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
                                   pretty_matrix.shape[1] - COST_MATRIX_OVERLAY_SIZE)
                 overlay_cm = pretty_matrix[win_start_x:win_start_x + COST_MATRIX_OVERLAY_SIZE,
                                            win_start_y:win_start_y + COST_MATRIX_OVERLAY_SIZE]
-            draw_time_slip_frame(vid_writer, frame1, frame2, this_frame_time_slip_ms,
-                                 last_frame_time_slip_ms - this_frame_time_slip_ms,
-                                 overlay_cm=overlay_cm, graph=graph, progress=(vid1_ofs_ms / vid1_len_ms))
+            this_frame_done_event = Event()
+            thread = Thread(target=draw_time_slip_frame, args=(out_vid_frame_queue, prev_frame_done_event, this_frame_done_event,
+                                                               frame1, frame2, vid1_ofs_ms, vid2_ofs_ms,
+                                                               this_frame_time_slip_ms,
+                                                               last_frame_time_slip_ms - this_frame_time_slip_ms,
+                                                               overlay_cm, graph, vid1_ofs_ms / vid1_len_ms))
+            thread.start()
+            prev_frame_done_event = this_frame_done_event
             last_frame_time_slip_ms = this_frame_time_slip_ms
+        out_vid_done_event.set()
+        vid1_done_event.set()
+        vid2_done_event.set()
+        vid_write_thread.join()
+        vid1_read_thread.join()
+        vid2_read_thread.join()
     else:
         vid_writer = cv2.VideoWriter(filename,
                                     cv2.VideoWriter_fourcc(*'mp4v'),
@@ -669,6 +766,7 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
                 vid_writer.write(np.vstack((np.hstack((frame1_np, frame2_np)),time_slip_bar_np)))
     
     vid_writer.release()
+    ax_vid_progress.EndProgress()
     bar.finish()
     return vid1_ofs_ms / 1000.0
 
@@ -773,12 +871,20 @@ def GenerateWithProcessedVids(vid1, vid2):
     if OUTPUT_TIME_SLIP_VIDEO:
         filepath = os.path.join(paths['OUTPUT_VIDEOS'], vid1_id + "_" + vid2_id + ".mp4")
         length_s = create_comparison_video(filepath, axvid1, axvid2, cost_matrix)
-        input_vid = ffmpeg.input(filepath)
-        input_aud = ffmpeg.input(ax_vid_video.AudFilename(axvid1),
-                                 ss='%f'%(axvid1.StartInMS()/1000.0),
-                                 t='%f'%(length_s))
-        sound_filepath = filepath[:-4] + "_sound.mp4"
-        ffmpeg.concat(input_vid, input_aud, v=1, a=1).output(sound_filepath).overwrite_output().run(quiet=False)
+        if True:
+            vid = mpe.VideoFileClip(filepath)
+            aud = mpe.AudioFileClip(ax_vid_video.AudFilename(axvid1))
+            start_s = axvid1.StartInMS() / 1000.0
+            aud = aud.subclip(start_s, start_s + length_s)
+            #aud.write_audiofile(filepath[:-4] + "_sound.m4a")
+            vid.set_audio(aud).write_videofile(filepath[:-4] + "_sound.mp4", audio_codec="aac", fps=axvid1.fps)
+        else:
+            input_vid = ffmpeg.input(filepath)
+            input_aud = ffmpeg.input(ax_vid_video.AudFilename(axvid1),
+                                    ss='%f'%(axvid1.StartInMS()/1000.0),
+                                    t='%f'%(length_s))
+            sound_filepath = filepath[:-4] + "_sound.mp4"
+            ffmpeg.concat(input_vid, input_aud, v=1, a=1).output(sound_filepath).overwrite_output().run(quiet=False)
 
    
 def DoVidCompare(axvid1, axvid2):

@@ -1,12 +1,17 @@
+#!/usr/bin/python3
+
 import os
 import wx
 import wx.lib.buttons as wxButtons
+from pubsub import pub
 import pytube
 import cv2
 import math
+from threading import Thread
 from ax_vid_compare import DoVidCompare
 import ax_vid_video
 import ax_vid_files
+import ax_vid_progress
 
 # Example URLs:
 
@@ -30,6 +35,10 @@ import ax_vid_files
 # https://www.youtube.com/watch?v=ZZazCAWcZy4 Jeff 
 # https://www.youtube.com/watch?v=wAjy2iLrYfg Tom L
 
+# Lake Elsinore / Storm Stadium 062523
+# https://www.youtube.com/watch?v=b4S-Q1oI_Nc Jeff
+# https://www.youtube.com/watch?v=TJ7ckc-qrH0 Yon
+
 def get_video_details(vid_player):
     fps = vid_player.get(cv2.CAP_PROP_FPS)
     num_frames = math.ceil(vid_player.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -41,23 +50,28 @@ ID_URL=0x10
 ID_START=0x20
 ID_FINISH=0x40
 
-download_progress = None
+progress = False
 def VidDownloadProgress(stream, chunk, bytes_remaining):
-    global download_progress
-    if download_progress is None:
-        download_progress = wx.ProgressDialog("Downloading...", "Downloading %s" % (stream.title))
-    download_progress.Update(int((stream.filesize - bytes_remaining) / stream.filesize * 100))
+    global progress
+    if not progress:
+        wx.CallAfter(pub.sendMessage, ax_vid_progress.START_PROGRESS,
+                     title="Downloading...",
+                     message="Downloading %s" % (stream.title),
+                     max=stream.filesize)
+        progress = True
+    wx.CallAfter(pub.sendMessage, ax_vid_progress.UPDATE_PROGRESS,
+                 progress=stream.filesize-bytes_remaining)
 
 def VidDownloadComplete(stream, file_path):
-    global download_progress
-    download_progress.Close()
-    download_progress = None
+    global progress
+    wx.CallAfter(pub.sendMessage, ax_vid_progress.END_PROGRESS)
+    progress = False
 
-class AxButton(wxButtons.ThemedGenButton):
+class AxButton(wxButtons.GenButton):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.SetForegroundColour(wx.BLACK)
-        self.SetBackgroundColour(wx.LIGHT_GREY)
+        #self.SetForegroundColour(wx.WHITE)
+        #self.SetBackgroundColour(wx.BLACK)
 
 class VidElements(object):
     def __init__(self, parent, index):
@@ -70,6 +84,12 @@ class VidElements(object):
         self.start_button = AxButton(parent, id=(ID_START | index), label="Set Start")
         self.finish_label = wx.StaticText(parent, label="Finish: Not set")
         self.finish_button = AxButton(parent, id=(ID_FINISH | index), label="Set Finish")
+    
+    def ResetStartLabel(self):
+        self.start_label.SetLabel("Start: Not set")
+    
+    def ResetFinishLabel(self):
+        self.finish_label.SetLabel("Finish: Not set")
 
 class VidComparison(wx.Frame):
     def __init__(self, parent):
@@ -88,7 +108,12 @@ class VidComparison(wx.Frame):
 
         self.doneButton = AxButton(self, label="Generate Comparison Video")
         self.doneButton.Bind(wx.EVT_BUTTON, self.OnDoneButton)
+        self.doneButton.Disable()
         self.topsizer.Add(self.doneButton, 1, wx.ALL, 5)
+
+        pub.subscribe(self.StartProgress, ax_vid_progress.START_PROGRESS)
+        pub.subscribe(self.UpdateProgress, ax_vid_progress.UPDATE_PROGRESS)
+        pub.subscribe(self.EndProgress, ax_vid_progress.END_PROGRESS)
 
         self.SetSizerAndFit(self.topsizer)
         self.Show(True)
@@ -115,6 +140,15 @@ class VidComparison(wx.Frame):
         horizontal.Add(buttonHorizontal, 1, 0)
         self.topsizer.Add(horizontal, 0, wx.EXPAND | wx.TOP, 5)
 
+    def StartProgress(self, title, message, max):
+        ax_vid_progress.StartGenericProgress(title, message, max)
+
+    def UpdateProgress(self, progress):
+        ax_vid_progress.UpdateGenericProgress(progress)
+
+    def EndProgress(self):
+        ax_vid_progress.EndGenericProgress()
+
     def OnUrlChanged(self, e):
         urlText = e.GetEventObject()
         urlId = urlText.GetId()
@@ -131,15 +165,28 @@ class VidComparison(wx.Frame):
             vid.register_on_complete_callback(VidDownloadComplete)
             axvid = ax_vid_video.LoadVideo(vid)
             self.axvid[index] = axvid
-            axvid.Verify(vid)
+            Thread(target=axvid.Verify, args=(vid,)).start()
+            #axvid.Verify(vid)
             ve.instructions_label.SetLabel("Set start/finish times")
             if hasattr(axvid, 'start_frame') and axvid.start_frame != None:
                 self.SetStartFrame(ve, axvid.start_frame, save_changes=False)
+            else:
+                ve.ResetStartLabel()
             if hasattr(axvid, 'finish_frame') and axvid.finish_frame != None:
                 self.SetFinishFrame(ve, axvid.finish_frame, save_changes=False)
+            else:
+                ve.ResetFinishLabel()
+            self.MaybeEnableDoneButton()
     
     def OnDoneButton(self, e):
-        DoVidCompare(self.axvid[0], self.axvid[1])
+        Thread(target=DoVidCompare, args=(self.axvid[0], self.axvid[1])).start()
+    
+    def MaybeEnableDoneButton(self):
+        enable = True
+        for axvid in self.axvid:
+            if axvid is None or not axvid.HasFramesSet():
+                enable = False
+        self.doneButton.Enable(enable)
     
     def SetStartFrame(self, ve, start_frame, save_changes=True):
         axvid = self.axvid[ve.index]
@@ -174,6 +221,7 @@ class VidComparison(wx.Frame):
                     self.SetStartFrame(ve, dlg.cur_frame)
                 else:
                     self.SetFinishFrame(ve, dlg.cur_frame)
+                self.MaybeEnableDoneButton()
 
 class VidFrameSelector(wx.Dialog):
     def __init__(self, parent, axvid, start):
@@ -215,10 +263,10 @@ class VidFrameSelector(wx.Dialog):
 
         if start and axvid.start_frame is not None:
             self.SetVideoFrame(axvid.start_frame)
-            self.slider.SetValue(axvid.start_frame / axvid.num_frames * 500)
+            self.slider.SetValue(int(axvid.start_frame / axvid.num_frames * 500))
         elif not start and axvid.finish_frame is not None:
             self.SetVideoFrame(axvid.finish_frame)
-            self.slider.SetValue(axvid.finish_frame / axvid.num_frames * 500)
+            self.slider.SetValue(int(axvid.finish_frame / axvid.num_frames * 500))
         else:
             self.SetVideoFrame(0)
 

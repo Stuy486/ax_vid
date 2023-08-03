@@ -60,6 +60,9 @@ class Video(object):
             self.start_frame = None
             self.finish_frame = None
     
+    def HasFramesSet(self):
+        return hasattr(self, 'start_frame') and hasattr(self, 'finish_frame') and self.start_frame is not None and self.finish_frame is not None
+    
     def StartInMS(self):
         if hasattr(self, 'start_frame'):
             return (1000 / self.fps * self.start_frame)

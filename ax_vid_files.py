@@ -8,7 +8,6 @@ paths = {
     'OUTPUT_VIDEOS': 'output_videos',
     'FONTS': 'fonts',
     'MODEL': 'yolov8_cone_detection_model',
-    'ULTRALYTICS_CFG': 'ultralytics_cfg.yaml'
 }
 
 osx_libs = [
@@ -28,6 +27,7 @@ def CreateDirectories():
             os.mkdir(abs_path)
         paths[name] = abs_path
 
+    # This bit is to make it work with PyInstaller:
     for lib in osx_libs:
         abs_path = os.path.join(base_dir, lib)
         if os.path.exists(abs_path) and not os.path.islink(abs_path):
