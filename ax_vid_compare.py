@@ -491,6 +491,8 @@ def get_time_slip_graph(axvid1, key_frames):
     draw = ImageDraw.Draw(time_slip_graph_image)
     line_points = [(frame, image_height - int(1 + (image_height - 2) * ((time_slip - min_time_slip) / time_slip_range))) for frame, time_slip in enumerate(time_slip_data)]
     draw.line(line_points, width=3)
+    zero_points = [(frame, 0) for frame, time_slip in enumerate(time_slip_data)]
+    draw.line(zero_points, width=1)
     np_frame = np.array(list(time_slip_graph_image.getdata())).reshape(image_height,num_vid1_frames,3).astype('float32')
     return cv2.resize(np_frame, (1920, TIME_SLIP_GRAPH_HEIGHT), interpolation=cv2.INTER_AREA)
 
@@ -535,7 +537,7 @@ def draw_time_slip_frame(out_vid_frame_queue, prev_frame_done_event, this_frame_
     elif total_time_slip > 0:
         text_x = 960 + time_delta_mag
         draw.rectangle([960, SLIP_BAR_Y, 960+time_delta_mag, SLIP_TEXT_Y], fill=bar_color, width=0)
-    draw.text((text_x,SLIP_TEXT_Y - 10), "%.3f" % (total_time_slip / 1000.0), font=draw_time_slip_frame.cached_font, fill=font_color)
+    draw.text((text_x,SLIP_TEXT_Y - 10), "%+.3f" % (-total_time_slip / 1000.0), font=draw_time_slip_frame.cached_font, fill=font_color)
     time_slip_bar_np = np.array(list(time_slip_bar_image.getdata())).reshape(TIMING_HEIGHT + SLIP_BAR_HEIGHT + SLIP_TEXT_HEIGHT,1920,3)
     time_slip_bar_np = np.uint8(time_slip_bar_np)
     # print(time_slip_bar_np.shape, np.hstack((frame1_np, frame2_np)).shape)
