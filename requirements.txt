@@ -1,0 +1,11 @@
+dtw-python
+ultralytics
+numpy
+Pillow
+progressbar
+scikit-learn
+wxPython
+pytube
+moviepy
+pypubsub
+dill
