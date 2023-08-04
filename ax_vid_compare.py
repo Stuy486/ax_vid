@@ -30,12 +30,11 @@ COST_MATRIX_OVERLAY_SIZE = 300 # pixels
 #ARGUMENTS
 DATA_HZ = 30 # Frequency of cone comparison for alignment. Higher is better, but slower
 #OUTPUT CONTROL
-OUTPUT_ANNOTATED_VIDEOS = True # Output copies of the input videos, but with cones annotated
+OUTPUT_ANNOTATED_VIDEOS = False # Output copies of the input videos, but with cones annotated
 OUTPUT_TIME_SLIP_VIDEO = True # Output the side-by-side time slip video
 OUTPUT_COST_MATRICES = True # Save cost matrices (raw, w/ dtw path, w/ smoothed poly path) as images
 OUTPUT_FPS = 60 # Broken with USE_POLY_KEY_FRAME_SMOOTHING.
 #TUNABLES
-MIN_DETECTION_SCORE = 0.5 # minimum confidence level for cone detection to consider a cone
 TARGET_DTW_AVERAGE_SCORE = 220 # 255 max, lower means more "gain" in cost matrix
 COST_MATRIX_RECENTER_INTERVAL = 10 # seconds, controls how frequently we estimate time slip while calculating cost matrix
 MAX_TIME_SLIP_PER_SECOND = .3 # In seconds. Increase if speed of one run is substantially different from the other. Larger value increases cost matrix creation time
@@ -43,7 +42,8 @@ USE_POLY_KEY_FRAME_SMOOTHING = True # Use polynomial smoothing when traversing p
 KEY_FRAME_COST_THRESHOLD = 230 # 255 max, higher means fewer but more confident key frames
 MIN_KEY_FRAME_DELTA = 1.0 # seconds
 MAX_KEY_FRAME_DELTA = 6.0 # seconds
-TARGET_CONES_PER_FRAME = 8 # number of cones. Higher will take longer to generate cost matrix, but it will be more accurate. Will not affect cone detection
+TARGET_CONES_PER_FRAME = 8 # Target average number of cones per frame. Higher will take longer to generate cost matrix, but it will be more accurate.
+                           # Most videos have at most 2 cones per frame availble.
 #DEBUGGING
 OVERLAY_COST_MATRIX_VISUALIZATION = False # Overlay the current snippet of the cost matrix in the output video
 LOAD_CACHED_COST_MATRIX = False # load from file rather than recomputing
@@ -60,7 +60,11 @@ def find_boxes_for_frame_torch(frame_np): # ([[boxes_np], [scores]], <model resu
         find_boxes_for_frame_torch.model = YOLO(os.path.join(paths['MODEL'], 'weights/best.pt'))
     
     ret = [[],[]]
-    results = find_boxes_for_frame_torch.model.predict(frame_np, verbose=False)
+    small = cv2.resize(frame_np, (1024, 576))
+    left = small[160:416,:512,:]
+    right = small[160:416,-512:,:]
+    stacked = np.vstack((left, right))
+    results = find_boxes_for_frame_torch.model.predict(stacked, verbose=False)
     boxes = results[0].boxes.cpu().numpy()
     for box in boxes:
         ret[0].append(box.xywh[0].tolist())
@@ -198,7 +202,7 @@ def process_video(axvid): # returns (vid_id, vid_player, aud_player, [frames dat
         vid_writer = cv2.VideoWriter(annotated_vid_filename,
                                      cv2.VideoWriter_fourcc(*'mp4v'),
                                      DATA_HZ,
-                                     (axvid.width,axvid.height))
+                                     (512,512))
 
     frame_num = 0
     next_processed_frame = axvid.start_frame
@@ -492,7 +496,7 @@ def get_time_slip_graph(axvid1, key_frames):
     line_points = [(frame, image_height - int(1 + (image_height - 2) * ((time_slip - min_time_slip) / time_slip_range))) for frame, time_slip in enumerate(time_slip_data)]
     draw.line(line_points, width=3)
     np_frame = np.array(list(time_slip_graph_image.getdata())).reshape(image_height,num_vid1_frames,3).astype('float32')
-    return cv2.resize(np_frame, (1920, TIME_SLIP_GRAPH_HEIGHT), interpolation=cv2.INTER_AREA)
+    return np.uint8(cv2.resize(np_frame, (1920, TIME_SLIP_GRAPH_HEIGHT), interpolation=cv2.INTER_AREA))
 
 def draw_time_slip_frame(out_vid_frame_queue, prev_frame_done_event, this_frame_done_event,
                          frame1, frame2, vid1_elapsed, vid2_elapsed,
@@ -500,8 +504,10 @@ def draw_time_slip_frame(out_vid_frame_queue, prev_frame_done_event, this_frame_
                          overlay_cm, graph, progress):
     if not hasattr(draw_time_slip_frame, "cached_font"):
         draw_time_slip_frame.cached_font = ImageFont.truetype(os.path.join(paths['FONTS'], "VollkornRegular.ttf"), size=40)
-    frame1_np = cv2.resize(frame1, (960,540))
-    frame2_np = cv2.resize(frame2, (960,540))
+
+    out_frame = np.zeros((1080,1920,3),dtype=np.uint8)
+    out_frame[:540,:960,:]  = cv2.resize(frame1, (960,540))
+    out_frame[:540,-960:,:] = cv2.resize(frame2, (960,540))
 
     slip_change_magnitude = min(1, abs(time_slip_since_last_frame) * 60 / 100)
     v = 80 # percentage
@@ -540,26 +546,28 @@ def draw_time_slip_frame(out_vid_frame_queue, prev_frame_done_event, this_frame_
     time_slip_bar_np = np.uint8(time_slip_bar_np)
     # print(time_slip_bar_np.shape, np.hstack((frame1_np, frame2_np)).shape)
 
-    frame_np = np.vstack((np.hstack((frame1_np, frame2_np)),time_slip_bar_np))
+    out_frame[540:540+TIMING_HEIGHT + SLIP_BAR_HEIGHT + SLIP_TEXT_HEIGHT,:,:] = time_slip_bar_np
+    #frame_np = np.vstack((np.hstack((frame1_np, frame2_np)),time_slip_bar_np))
     if graph is not None and progress is not None:
         time_delta_mag = min(960, 960 * abs(total_time_slip/4000))
-        frame_np = np.vstack((frame_np, np.uint8(graph)))
+        #frame_np = np.vstack((frame_np, graph))
+        out_frame[-TIME_SLIP_GRAPH_HEIGHT:,:,:] = graph
         play_head_center = int(1920 * progress)
-        frame_np[-TIME_SLIP_GRAPH_HEIGHT:,
+        out_frame[-TIME_SLIP_GRAPH_HEIGHT:,
                  max(0,play_head_center - 1):min(1919,play_head_center + 1),
                  :] = 255
     
     if OVERLAY_COST_MATRIX_VISUALIZATION and overlay_cm is not None:
-        frame_np[:COST_MATRIX_OVERLAY_SIZE,
+        out_frame[:COST_MATRIX_OVERLAY_SIZE,
                  960-int(COST_MATRIX_OVERLAY_SIZE/2):960+int(COST_MATRIX_OVERLAY_SIZE/2)] = cv2.cvtColor(overlay_cm, cv2.COLOR_GRAY2RGB)
+    
     prev_frame_done_event.wait()
-    out_vid_frame_queue.put(frame_np)
+    out_vid_frame_queue.put(out_frame)
     this_frame_done_event.set()
 
-def vid_read_worker(frame_queue, done_event, vid_player, start_ms, start_frame):
-    cur_frame_num = start_frame
-    cur_frame = None
-    cur_ts = None
+def vid_read_worker(frame_queue, done_event, axvid, start_ms, start_frame):
+    vid_player = ax_vid_video.VidPlayer(axvid)
+    vid_player.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     while not done_event.is_set():
         if cur_frame is None:
             cur_ts = vid_player.get(cv2.CAP_PROP_POS_MSEC) - start_ms
@@ -573,7 +581,11 @@ def vid_read_worker(frame_queue, done_event, vid_player, start_ms, start_frame):
         except Full:
             pass
 
-def vid_write_worker(frame_queue, done_event, vid_writer):
+def vid_write_worker(frame_queue, done_event, filename, fps):
+    vid_writer = cv2.VideoWriter(filename,
+                                 cv2.VideoWriter_fourcc(*'mp4v'),
+                                 fps,
+                                 (1920,1080))
     while not frame_queue.empty() or not done_event.is_set():
         try:
             frame = frame_queue.get(timeout=0.25)
@@ -616,23 +628,27 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
         pretty_matrix = invert(initial_cost_matrix).astype(np.uint8)
 
     if USE_POLY_KEY_FRAME_SMOOTHING:
-        vid_writer = cv2.VideoWriter(filename,
-                                    cv2.VideoWriter_fourcc(*'mp4v'),
-                                    axvid1.fps,
-                                    (1920,1080))
+        #vid_writer = cv2.VideoWriter(filename,
+        #                            cv2.VideoWriter_fourcc(*'mp4v'),
+        #                            axvid1.fps,
+        #                            (1920,1080))
         kf_ts, kf_poly_coefs = get_key_frame_poly_data(key_frames)
 
-        # limit queue depth here just so it doesn't get super full. When the vid writer is the bottleneck, there's no use
-        # having a massive queue of frames, it'll just consume a bunch of RAM and make the progressbar wrong.
-        out_vid_frame_queue = Queue(maxsize=5) 
-        out_vid_done_event = Event()
-        vid_write_thread = Thread(target=vid_write_worker, args=(out_vid_frame_queue, out_vid_done_event, vid_writer))
+
+        # It turns out all this multithreading was worhtless, because Python
+        # apparently can't run two threads at once due to GIL. You can use the
+        # multiprocessing library to get around it, but it's too much work to
+        # synchronize them for me to deem it worth it...
+        done_event = Event()
+
+        out_vid_frame_queue = Queue(os.cpu_count()) 
+        vid_write_thread = Thread(target=vid_write_worker, args=(out_vid_frame_queue, done_event, filename, axvid1.fps))
+
         vid1_frame_queue = Queue(maxsize=5)
-        vid1_done_event = Event()
-        vid1_read_thread = Thread(target=vid_read_worker, args=(vid1_frame_queue, vid1_done_event, vid1_player, vid1_start_ms, vid1_start_frame))
+        vid1_read_thread = Thread(target=vid_read_worker, args=(vid1_frame_queue, done_event, axvid1, vid1_start_ms, vid1_start_frame))
+
         vid2_frame_queue = Queue(maxsize=5)
-        vid2_done_event = Event()
-        vid2_read_thread = Thread(target=vid_read_worker, args=(vid2_frame_queue, vid2_done_event, vid2_player, vid2_start_ms, vid2_start_frame))
+        vid2_read_thread = Thread(target=vid_read_worker, args=(vid2_frame_queue, done_event, axvid2, vid2_start_ms, vid2_start_frame))
 
         vid_write_thread.start()
         vid1_read_thread.start()
@@ -688,21 +704,18 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
                 overlay_cm = pretty_matrix[win_start_x:win_start_x + COST_MATRIX_OVERLAY_SIZE,
                                            win_start_y:win_start_y + COST_MATRIX_OVERLAY_SIZE]
             this_frame_done_event = Event()
-            thread = Thread(target=draw_time_slip_frame, args=(out_vid_frame_queue, prev_frame_done_event, this_frame_done_event,
-                                                               frame1, frame2, vid1_ofs_ms, vid2_ofs_ms,
-                                                               this_frame_time_slip_ms,
-                                                               last_frame_time_slip_ms - this_frame_time_slip_ms,
-                                                               overlay_cm, graph, vid1_ofs_ms / vid1_len_ms))
-            thread.start()
+            Thread(target=draw_time_slip_frame, args=(out_vid_frame_queue, prev_frame_done_event, this_frame_done_event,
+                                                      frame1, frame2, vid1_ofs_ms, vid2_ofs_ms,
+                                                      this_frame_time_slip_ms,
+                                                      last_frame_time_slip_ms - this_frame_time_slip_ms,
+                                                      overlay_cm, graph, vid1_ofs_ms / vid1_len_ms)).start()
             prev_frame_done_event = this_frame_done_event
             last_frame_time_slip_ms = this_frame_time_slip_ms
 
         # Make sure all the frames are in the queue before signalling completion
         this_frame_done_event.wait()
 
-        out_vid_done_event.set()
-        vid1_done_event.set()
-        vid2_done_event.set()
+        done_event.set()
         vid_write_thread.join()
         vid1_read_thread.join()
         vid2_read_thread.join()
