@@ -568,6 +568,9 @@ def draw_time_slip_frame(out_vid_frame_queue, prev_frame_done_event, this_frame_
 def vid_read_worker(frame_queue, done_event, axvid, start_ms, start_frame):
     vid_player = ax_vid_video.VidPlayer(axvid)
     vid_player.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    cur_frame_num = start_frame
+    cur_frame = None
+    cur_ts = None
     while not done_event.is_set():
         if cur_frame is None:
             cur_ts = vid_player.get(cv2.CAP_PROP_POS_MSEC) - start_ms
@@ -592,6 +595,7 @@ def vid_write_worker(frame_queue, done_event, filename, fps):
             vid_writer.write(frame)
         except Empty:
             pass
+    vid_writer.release()
 
 def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
     vid1_player = ax_vid_video.VidPlayer(axvid1)
@@ -641,13 +645,13 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
         # synchronize them for me to deem it worth it...
         done_event = Event()
 
-        out_vid_frame_queue = Queue(os.cpu_count()) 
+        out_vid_frame_queue = Queue(maxsize=os.cpu_count()) 
         vid_write_thread = Thread(target=vid_write_worker, args=(out_vid_frame_queue, done_event, filename, axvid1.fps))
 
-        vid1_frame_queue = Queue(maxsize=5)
+        vid1_frame_queue = Queue(maxsize=os.cpu_count())
         vid1_read_thread = Thread(target=vid_read_worker, args=(vid1_frame_queue, done_event, axvid1, vid1_start_ms, vid1_start_frame))
 
-        vid2_frame_queue = Queue(maxsize=5)
+        vid2_frame_queue = Queue(maxsize=os.cpu_count())
         vid2_read_thread = Thread(target=vid_read_worker, args=(vid2_frame_queue, done_event, axvid2, vid2_start_ms, vid2_start_frame))
 
         vid_write_thread.start()
@@ -782,7 +786,6 @@ def create_comparison_video(filename, axvid1, axvid2, initial_cost_matrix):
 
                 vid_writer.write(np.vstack((np.hstack((frame1_np, frame2_np)),time_slip_bar_np)))
     
-    vid_writer.release()
     ax_vid_progress.EndProgress()
     bar.finish()
     return vid1_ofs_ms / 1000.0
