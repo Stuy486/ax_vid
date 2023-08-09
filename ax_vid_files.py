@@ -17,6 +17,12 @@ osx_libs = [
     'libtorch_cpu.dylib'
 ]
 
+def GetPairId(axvids):
+    return "_".join(axvid.yt_id[:3] for axvid in axvids)
+
+def GetPairOutputFile(axvids):
+    return os.path.join(paths['OUTPUT_VIDEOS'], GetPairId(axvids) + ".mp4")
+
 def CreateDirectories():
     base_dir = os.path.dirname(__file__)
     print(base_dir)

@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-import os
 import wx
 import wx.lib.buttons as wxButtons
 from pubsub import pub
@@ -8,10 +7,12 @@ import pytube
 import cv2
 import math
 from threading import Thread
-from ax_vid_compare import DoVidCompare
-import ax_vid_video
-import ax_vid_files
-import ax_vid_progress
+from ax_vid_cone_detect import process_video
+from ax_vid_draw_frame import GenerateWithProcessedVids
+import ax_vid_video as axv_vid
+import ax_vid_files as axv_files
+import ax_vid_progress as axv_prog
+import ax_vid_cost_matrix as axv_cm
 
 # Example URLs:
 
@@ -39,6 +40,12 @@ import ax_vid_progress
 # https://www.youtube.com/watch?v=b4S-Q1oI_Nc Jeff
 # https://www.youtube.com/watch?v=TJ7ckc-qrH0 Yon
 
+# Setting these will auto-fill the text boxes for faster testing of changes
+test_url1 = None
+test_url2 = None
+#test_url1 = 'https://www.youtube.com/watch?v=b4S-Q1oI_Nc'
+#test_url2 = 'https://www.youtube.com/watch?v=TJ7ckc-qrH0'
+
 def get_video_details(vid_player):
     fps = vid_player.get(cv2.CAP_PROP_FPS)
     num_frames = math.ceil(vid_player.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -54,17 +61,17 @@ progress = False
 def VidDownloadProgress(stream, chunk, bytes_remaining):
     global progress
     if not progress:
-        wx.CallAfter(pub.sendMessage, ax_vid_progress.START_PROGRESS,
+        wx.CallAfter(pub.sendMessage, axv_prog.START_PROGRESS,
                      title="Downloading...",
                      message="Downloading %s" % (stream.title),
                      max=stream.filesize)
         progress = True
-    wx.CallAfter(pub.sendMessage, ax_vid_progress.UPDATE_PROGRESS,
+    wx.CallAfter(pub.sendMessage, axv_prog.UPDATE_PROGRESS,
                  progress=stream.filesize-bytes_remaining)
 
 def VidDownloadComplete(stream, file_path):
     global progress
-    wx.CallAfter(pub.sendMessage, ax_vid_progress.END_PROGRESS)
+    wx.CallAfter(pub.sendMessage, axv_prog.END_PROGRESS)
     progress = False
 
 class AxButton(wxButtons.GenButton):
@@ -111,9 +118,13 @@ class VidComparison(wx.Frame):
         self.doneButton.Disable()
         self.topsizer.Add(self.doneButton, 1, wx.ALL, 5)
 
-        pub.subscribe(self.StartProgress, ax_vid_progress.START_PROGRESS)
-        pub.subscribe(self.UpdateProgress, ax_vid_progress.UPDATE_PROGRESS)
-        pub.subscribe(self.EndProgress, ax_vid_progress.END_PROGRESS)
+        pub.subscribe(self.StartProgress, axv_prog.START_PROGRESS)
+        pub.subscribe(self.UpdateProgress, axv_prog.UPDATE_PROGRESS)
+        pub.subscribe(self.EndProgress, axv_prog.END_PROGRESS)
+
+        if test_url1 != None and test_url2 != None:
+            self.ve[0].url_box.SetValue(test_url1)
+            self.ve[1].url_box.SetValue(test_url2)
 
         self.SetSizerAndFit(self.topsizer)
         self.Show(True)
@@ -141,13 +152,13 @@ class VidComparison(wx.Frame):
         self.topsizer.Add(horizontal, 0, wx.EXPAND | wx.TOP, 5)
 
     def StartProgress(self, title, message, max):
-        ax_vid_progress.StartGenericProgress(title, message, max)
+        axv_prog.StartGenericProgress(title, message, max)
 
     def UpdateProgress(self, progress):
-        ax_vid_progress.UpdateGenericProgress(progress)
+        axv_prog.UpdateGenericProgress(progress)
 
     def EndProgress(self):
-        ax_vid_progress.EndGenericProgress()
+        axv_prog.EndGenericProgress()
 
     def OnUrlChanged(self, e):
         urlText = e.GetEventObject()
@@ -163,7 +174,7 @@ class VidComparison(wx.Frame):
         else:
             vid.register_on_progress_callback(VidDownloadProgress)
             vid.register_on_complete_callback(VidDownloadComplete)
-            axvid = ax_vid_video.LoadVideo(vid)
+            axvid = axv_vid.LoadVideo(vid)
             self.axvid[index] = axvid
             Thread(target=axvid.Verify, args=(vid,)).start()
             #axvid.Verify(vid)
@@ -179,7 +190,11 @@ class VidComparison(wx.Frame):
             self.MaybeEnableDoneButton()
     
     def OnDoneButton(self, e):
-        Thread(target=DoVidCompare, args=(self.axvid[0], self.axvid[1])).start()
+        #draw_frame_workers = axv_draw.start_drawing_workers()
+        #vid_writer_worker = axv_draw.start_vid_out_worker(draw_frame_workers[4],
+        #                                                  axv_files.GetPairOutputFile(self.axvid),
+        #                                                  self.axvid[0].fps)
+        Thread(target=DoVidCompare, args=(self.axvid,)).start()
     
     def MaybeEnableDoneButton(self):
         enable = True
@@ -195,7 +210,7 @@ class VidComparison(wx.Frame):
         if axvid.finish_frame != None:
             ve.instructions_label.SetLabel("%s video is ready" % ("First" if ve.index == 0 else "Second"))
             if save_changes:
-                ax_vid_video.SaveVideo(axvid)
+                axv_vid.SaveVideo(axvid)
 
     def SetFinishFrame(self, ve, finish_frame, save_changes=True):
         axvid = self.axvid[ve.index]
@@ -204,7 +219,7 @@ class VidComparison(wx.Frame):
         if axvid.start_frame != None:
             ve.instructions_label.SetLabel("%s video is ready" % ("First" if ve.index == 0 else "Second"))
             if save_changes:
-                ax_vid_video.SaveVideo(axvid)
+                axv_vid.SaveVideo(axvid)
     
     def OnSetFrame(self, e):
         buttonId = e.GetEventObject().GetId()
@@ -223,6 +238,7 @@ class VidComparison(wx.Frame):
                     self.SetFinishFrame(ve, dlg.cur_frame)
                 self.MaybeEnableDoneButton()
 
+
 class VidFrameSelector(wx.Dialog):
     def __init__(self, parent, axvid, start):
         wx.Dialog.__init__(self, parent, title="Video Frame Selector")
@@ -230,7 +246,7 @@ class VidFrameSelector(wx.Dialog):
         self.topsizer = wx.BoxSizer(wx.VERTICAL)
 
         self.axvid = axvid
-        self.vid_player = ax_vid_video.VidPlayer(axvid)
+        self.vid_player = axv_vid.VidPlayer(axvid)
 
         self.instructions_label = wx.StaticText(self,
             label="Seek to the frame in the video where the car crosses the %s line." %
@@ -298,8 +314,14 @@ class VidFrameSelector(wx.Dialog):
     def OnExit(self,e):
         self.Close(True)  # Close the frame.
 
+def DoVidCompare(axvids):
+    vid1_data = process_video(axvids[0])
+    vid2_data = process_video(axvids[1])
+    cm = axv_cm.GetCostMatrix(vid1_data, vid2_data, axv_files.GetPairId(axvids))
+    GenerateWithProcessedVids(axvids, cm)
+
 if __name__ == '__main__':
-    ax_vid_files.CreateDirectories()
+    axv_files.CreateDirectories()
     app = wx.App(False) # Create a new app, don't redirect stdout/stderr to a window.
     frame = VidComparison(None)
     app.MainLoop()
