@@ -98,7 +98,7 @@ def calculate_frame_similarity(data1, data2):
         distances_weight = .1 * min(8, num_A - 1)
         translation_distance = math.sqrt((t[0]*t[0])+(t[1]*t[1]))
         return (np.mean(distances) * distances_weight) + (translation_distance * (1.0 - distances_weight))
-    
+
 def calculate_frame_similarity2(data1, data2):
     scores = []
     for a, a_conf in zip(data1[0], data1[1]):
@@ -111,10 +111,11 @@ def calculate_frame_similarity2(data1, data2):
                 closest = b
                 closest_conf = b_conf
                 closest_dist = dist
-        scores.append((closest_dist + 10 * (abs(a[2]-closest[2]) + abs(a[3]-closest[3]))) / (a_conf * closest_conf))
+        scores.append((1.0 * closest_dist) +   # Distance to nearest cone
+                      (4.0 * (1.0 * abs(a[2]-closest[2]) +  # Cone size difference horizontally
+                              5.0 * abs(a[3]-closest[3])))) # Cone size difference vertically
 
     scores.sort()
-    scores = scores[:len(data1[0])]
     
     return sum(scores) / len(scores)
 
@@ -144,7 +145,7 @@ def find_path_through_cost_matrix(cost_matrix):
             break
     return dtw_path
 
-def get_initial_cost_matrix(vid1_data, vid2_data):
+def get_initial_cost_matrix(vid1_data, vid2_data, data_hz):
     # This should probably change, but for now, we're just creating the cost matrix so it has one
     # entry on each axis for every frame that we have cone data for. This means that for the cost
     # matrix to be monotonic along each axis, the frame data provided must be evenly spaced. This
@@ -169,14 +170,14 @@ def get_initial_cost_matrix(vid1_data, vid2_data):
                                   data1_matrix_dim)
 
     current_time_slip_estimate = 0 # in DATA_HZ increments, i.e. vid_data[n]
-    time_slip_check_interval = COST_MATRIX_RECENTER_INTERVAL * DATA_HZ # In DATA_HZ increments
+    time_slip_check_interval = COST_MATRIX_RECENTER_INTERVAL * data_hz # In DATA_HZ increments
     next_time_slip_check = time_slip_check_interval
 
     max_score = 0
     data1_matrix_dim = 0
     max_comparison_window = time_slip_check_interval / (1 / MAX_TIME_SLIP_PER_SECOND)
     comparison_window_increment = max_comparison_window / time_slip_check_interval
-    current_comparison_window = DATA_HZ / 4.0
+    current_comparison_window = data_hz / 4.0
     #prof = cProfile.Profile()
     #prof.enable()
     for data1 in vid1_data:
@@ -202,7 +203,7 @@ def get_initial_cost_matrix(vid1_data, vid2_data):
                 index = data1_matrix_dim - int(time_slip_check_interval * 1 / 4)
                 current_time_slip_estimate = current_dtw_path.index2[index] - current_dtw_path.index1[index]
                 data2_offset_dim = data1_matrix_dim + current_time_slip_estimate
-                current_comparison_window = DATA_HZ / 4.0
+                current_comparison_window = data_hz / 4.0
         current_comparison_window += comparison_window_increment
         if data2_offset_dim > data2_matrix_dim:
             # If the diagonal projection of the current time slip estimate runs off the
@@ -235,7 +236,7 @@ def get_initial_cost_matrix(vid1_data, vid2_data):
 
     score_clamp = cost_matrix.min() + 10
     average_along_dtw = 255
-    while average_along_dtw > 200:
+    while average_along_dtw > TARGET_DTW_AVERAGE_SCORE:
         clamped_cm = np.where(cost_matrix > score_clamp, score_clamp, cost_matrix)
         clamped_cm *= 255.0/clamped_cm.max()
         test_dtw = dtw.dtw(clamped_cm, step_pattern='typeIbs')
@@ -246,13 +247,13 @@ def get_initial_cost_matrix(vid1_data, vid2_data):
 
     return clamped_cm
 
-def identify_key_frames(initial_cost_matrix):
+def identify_key_frames(initial_cost_matrix, data_hz):
     alignment = dtw.dtw(initial_cost_matrix, step_pattern='typeIbs')
 
     path = list(zip(alignment.index1, alignment.index2))
     if USE_SMOOTHED_DTW_PATH:
         smoothed_path = []
-        smothing_window = DATA_HZ
+        smothing_window = data_hz
         for i in range(len(path)):
             start = max(0, i - int(smothing_window / 2))
             end = min(len(path) - 1, start + smothing_window)
@@ -260,8 +261,8 @@ def identify_key_frames(initial_cost_matrix):
             i2_avg = int(np.mean([i2 for (_,i2) in path[start:end]]))
             smoothed_path.append((i1_avg,i2_avg))
         path = smoothed_path
-    minimum_key_delta = int(DATA_HZ * MIN_KEY_FRAME_DELTA)
-    maximum_key_delta = int(DATA_HZ * MAX_KEY_FRAME_DELTA)
+    minimum_key_delta = int(data_hz * MIN_KEY_FRAME_DELTA)
+    maximum_key_delta = int(data_hz * MAX_KEY_FRAME_DELTA)
     key_frames = []
 
     last = 0
@@ -285,17 +286,17 @@ def identify_key_frames(initial_cost_matrix):
 
     #if best_since_last != 0 and len(path) - last > minimum_key_delta:
     #    key_frames.append(path[best_since_last])
-    if (abs(path[-1][0] - key_frames[-1][0]) / DATA_HZ) > (MIN_KEY_FRAME_DELTA * 2):
+    if (abs(path[-1][0] - key_frames[-1][0]) / data_hz) > (MIN_KEY_FRAME_DELTA * 2):
         key_frames.append(path[-1])
     else:
         key_frames[-1] = path[-1]
 
     return key_frames
 
-def get_key_frame_poly_data(key_frames): # [(vid1_ts_s, vid2_ts_s)], [coefs]
+def get_key_frame_poly_data(key_frames, data_hz): # [(vid1_ts_s, vid2_ts_s)], [coefs]
     kf_ts = np.asarray([(0,0)] + [
-        (1000.0 * vid1_kf_index * (1 / DATA_HZ),
-         1000.0 * vid2_kf_index * (1 / DATA_HZ))
+        (1000.0 * vid1_kf_index * (1 / data_hz),
+         1000.0 * vid2_kf_index * (1 / data_hz))
          for (vid1_kf_index, vid2_kf_index) in key_frames])
     kf_coefs = [None] * len(kf_ts)
     for i in range(len(kf_ts)):
@@ -305,8 +306,8 @@ def get_key_frame_poly_data(key_frames): # [(vid1_ts_s, vid2_ts_s)], [coefs]
         kf_coefs[i] = poly.polyfit(x, y, len(slice) - 1)
     return kf_ts, kf_coefs
 
-def GetCostMatrix(vid1_data, vid2_data, pair_id):
-    cm_file_base = os.path.join(paths['COST_MATRICES'], "%s_%dhz_" % (pair_id, DATA_HZ))
+def GetCostMatrix(vid1_data, vid2_data, data_hz, pair_id):
+    cm_file_base = os.path.join(paths['COST_MATRICES'], "%s_%dhz_" % (pair_id, data_hz))
 
     cost_matrix = None
     cached_matrix_loaded = False
@@ -321,7 +322,7 @@ def GetCostMatrix(vid1_data, vid2_data, pair_id):
             cached_matrix_loaded = True
     
     if cost_matrix is None:
-        cost_matrix = get_initial_cost_matrix(vid1_data, vid2_data)
+        cost_matrix = get_initial_cost_matrix(vid1_data, vid2_data, data_hz)
     
     if OUTPUT_COST_MATRICES:
         def invert_func(num):
@@ -332,7 +333,7 @@ def GetCostMatrix(vid1_data, vid2_data, pair_id):
 
         path = list(zip(alignment.index1, alignment.index2))
         smoothed_path = []
-        smothing_window = DATA_HZ
+        smothing_window = data_hz
         for i in range(len(path)):
             start = max(0, i - int(smothing_window / 2))
             end = min(len(path) - 1, start + smothing_window)
@@ -353,7 +354,7 @@ def GetCostMatrix(vid1_data, vid2_data, pair_id):
             visualize_path[x] = np.full((20), pretty_matrix[x][y])
             pretty_matrix[x][y] = 255
         
-        key_frames = identify_key_frames(cost_matrix)
+        key_frames = identify_key_frames(cost_matrix, data_hz)
         for (i1,i2) in key_frames:
             for (x,y) in zip(range(i1 + 5, i1 - 6, -1), range(i2 - 5, i2 + 6)):
                 try:
@@ -370,9 +371,9 @@ def GetCostMatrix(vid1_data, vid2_data, pair_id):
                         poly_matrix[x][y] = 255
                     except:
                         pass
-            kf_ts, kf_poly_coefs = get_key_frame_poly_data(key_frames)
+            kf_ts, kf_poly_coefs = get_key_frame_poly_data(key_frames, data_hz)
             for i1 in range(poly_matrix.shape[0]):
-                vid1_ofs_ms = (i1 * (1 / DATA_HZ)) * 1000.0
+                vid1_ofs_ms = (i1 * (1 / data_hz)) * 1000.0
                 while len(kf_ts) > 2 and vid1_ofs_ms > kf_ts[1][0]:
                     kf_ts = kf_ts[1:]
                     kf_poly_coefs = kf_poly_coefs[1:]
@@ -385,9 +386,9 @@ def GetCostMatrix(vid1_data, vid2_data, pair_id):
                 b_poly_val = poly.polyval(vid1_ofs_ms, kf_poly_coefs[1])
                 target_vid2_ofs_ms = (a_poly_val * (1 - percentage)) + (b_poly_val * percentage)
 
-                ya = int(a_poly_val / 1000.0 * DATA_HZ)
-                yb = int(b_poly_val / 1000.0 * DATA_HZ)
-                yres = int(target_vid2_ofs_ms / 1000.0 * DATA_HZ)
+                ya = int(a_poly_val / 1000.0 * data_hz)
+                yb = int(b_poly_val / 1000.0 * data_hz)
+                yres = int(target_vid2_ofs_ms / 1000.0 * data_hz)
                 try:
                     # poly_matrix[i1][ya] = 255
                     # poly_matrix[i1][yb] = 255

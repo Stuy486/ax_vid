@@ -7,10 +7,11 @@ import pytube
 import cv2
 import math
 from threading import Thread
-from ax_vid_cone_detect import process_video
+from ax_vid_cone_detect import process_video, save_cone_histograms
 from ax_vid_draw_frame import GenerateWithProcessedVids
 import ax_vid_video as axv_vid
 import ax_vid_files as axv_files
+from ax_vid_config import *
 import ax_vid_progress as axv_prog
 import ax_vid_cost_matrix as axv_cm
 
@@ -40,11 +41,18 @@ import ax_vid_cost_matrix as axv_cm
 # https://www.youtube.com/watch?v=b4S-Q1oI_Nc Jeff
 # https://www.youtube.com/watch?v=TJ7ckc-qrH0 Yon
 
+# Nats '23 West
+# https://youtu.be/EJQ4nr3_1X8 Jeff run 2 (+1)
+# https://youtu.be/gfpw7U9QjXM Jeff run 3
+# https://youtu.be/1dUaEa0tNJE Yon
+# https://www.youtube.com/watch?v=YegcMbwbKlU Mack
+# https://www.youtube.com/watch?v=UHVos9SX7cE Justin
+
 # Setting these will auto-fill the text boxes for faster testing of changes
 test_url1 = None
 test_url2 = None
-#test_url1 = 'https://www.youtube.com/watch?v=b4S-Q1oI_Nc'
-#test_url2 = 'https://www.youtube.com/watch?v=TJ7ckc-qrH0'
+#test_url1 = 'https://youtu.be/EJQ4nr3_1X8'
+#test_url2 = 'https://youtu.be/gfpw7U9QjXM'
 
 def get_video_details(vid_player):
     fps = vid_player.get(cv2.CAP_PROP_FPS)
@@ -315,10 +323,12 @@ class VidFrameSelector(wx.Dialog):
         self.Close(True)  # Close the frame.
 
 def DoVidCompare(axvids):
-    vid1_data = process_video(axvids[0])
-    vid2_data = process_video(axvids[1])
-    cm = axv_cm.GetCostMatrix(vid1_data, vid2_data, axv_files.GetPairId(axvids))
-    GenerateWithProcessedVids(axvids, cm)
+    data_hz = min(DATA_HZ, math.floor(axvids[0].fps), math.floor(axvids[1].fps))
+    vid1_data = process_video(axvids[0], data_hz, 0)
+    vid2_data = process_video(axvids[1], data_hz, 0)
+    #save_cone_histograms(vid1_data, vid2_data, axvids)
+    cm = axv_cm.GetCostMatrix(vid1_data, vid2_data, data_hz, axv_files.GetPairId(axvids))
+    GenerateWithProcessedVids(axvids, cm, data_hz)
 
 if __name__ == '__main__':
     axv_files.CreateDirectories()

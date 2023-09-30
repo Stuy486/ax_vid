@@ -15,14 +15,16 @@ OUTPUT_TIME_SLIP_VIDEO = True # Output the side-by-side time slip video
 OUTPUT_COST_MATRICES = True # Save cost matrices (raw, w/ dtw path, w/ smoothed poly path) as images
 OUTPUT_FPS = 60 # Broken with USE_POLY_KEY_FRAME_SMOOTHING.
 #TUNABLES
-TARGET_DTW_AVERAGE_SCORE = 220 # 255 max, lower means more "gain" in cost matrix
-COST_MATRIX_RECENTER_INTERVAL = 10 # seconds, controls how frequently we estimate time slip while calculating cost matrix
+TARGET_DTW_AVERAGE_SCORE = 180 # 255 max, lower means more "gain" in cost matrix
+COST_MATRIX_RECENTER_INTERVAL = 16 # seconds, controls how frequently we estimate time slip while calculating cost matrix
 MAX_TIME_SLIP_PER_SECOND = .3 # In seconds. Increase if speed of one run is substantially different from the other. Larger value increases cost matrix creation time
 USE_POLY_KEY_FRAME_SMOOTHING = True # Use polynomial smoothing when traversing path. Video is processed frame-by-frame rather than timestamp-to-timestamp, much faster
-KEY_FRAME_COST_THRESHOLD = 230 # 255 max, higher means fewer but more confident key frames
-MIN_KEY_FRAME_DELTA = 1.0 # seconds
-MAX_KEY_FRAME_DELTA = 6.0 # seconds
-TARGET_CONES_PER_FRAME = 8 # Target average number of cones per frame. Higher will take longer to generate cost matrix, but it will be more accurate.
+KEY_FRAME_COST_THRESHOLD = 200 # 255 max, higher means fewer but more confident key frames
+MIN_KEY_FRAME_DELTA = 3.0 # seconds. Lower can result in more frequent key frames. With data that doesn't line up well, this is mostly bad
+                          # because you end up with errant key frames close together, resulting in unrealistic (and incorrect) time slip.
+MAX_KEY_FRAME_DELTA = 8.0 # seconds. Higher will result in a smoother time slip graph, and more accurate on the macro scale. Lower
+                          # might have more details, but is more prone to error. 6-10 seems to be the sweet spot for.
+TARGET_CONES_PER_FRAME = 5 # Target average number of cones per frame. Higher will take longer to generate cost matrix, but it will be more accurate.
                            # Most videos have at most 2 cones per frame availble.
 #DEBUGGING
 OVERLAY_COST_MATRIX_VISUALIZATION = False # Overlay the current snippet of the cost matrix in the output video

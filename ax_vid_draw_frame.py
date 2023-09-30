@@ -30,11 +30,11 @@ SLIP_BAR_Y = TIMING_Y + TIMING_HEIGHT
 SLIP_TEXT_Y = SLIP_BAR_Y + SLIP_BAR_HEIGHT
 SLIP_GRAPH_Y = SLIP_TEXT_Y + SLIP_TEXT_HEIGHT
 
-def get_time_slip_graph(axvid1, key_frames):
+def get_time_slip_graph(axvid1, key_frames, data_hz):
     num_vid1_frames = key_frames[-1][0]
     time_slip_data = []
     if USE_POLY_KEY_FRAME_SMOOTHING:
-        kf_ts, kf_poly_coefs = axv_cm.get_key_frame_poly_data(key_frames)
+        kf_ts, kf_poly_coefs = axv_cm.get_key_frame_poly_data(key_frames, data_hz)
         for vid1_frame in range(num_vid1_frames):
             vid1_ofs_ms = vid1_frame * (1000.0 / axvid1.fps)
             while len(kf_ts) > 2 and vid1_ofs_ms > kf_ts[1][0]:
@@ -117,9 +117,9 @@ def draw_frame(out_frame, frame1, frame2, vid1_elapsed, vid2_elapsed,
                  max(0,play_head_center - 1):min(1919,play_head_center + 1),
                  :] = 255
     
-    #if OVERLAY_COST_MATRIX_VISUALIZATION and overlay_cm is not None:
-    #    out_frame[:COST_MATRIX_OVERLAY_SIZE,
-    #             960-int(COST_MATRIX_OVERLAY_SIZE/2):960+int(COST_MATRIX_OVERLAY_SIZE/2)] = cv2.cvtColor(overlay_cm, cv2.COLOR_GRAY2RGB)
+    if OVERLAY_COST_MATRIX_VISUALIZATION and overlay_cm is not None:
+        out_frame[:COST_MATRIX_OVERLAY_SIZE,
+                  960-int(COST_MATRIX_OVERLAY_SIZE/2):960+int(COST_MATRIX_OVERLAY_SIZE/2)] = cv2.cvtColor(overlay_cm, cv2.COLOR_GRAY2RGB)
 
     return out_frame
 
@@ -240,7 +240,7 @@ def start_drawing_workers(num_workers, done_frame_num):
     
     return (procs, done_event, draw_frame_args_queue)
 
-def create_comparison_video(axvids, initial_cost_matrix):
+def create_comparison_video(axvids, initial_cost_matrix, data_hz):
     vid1_player = axv_vid.VidPlayer(axvids[0])
     vid2_player = axv_vid.VidPlayer(axvids[1])
     output_fps = min(OUTPUT_FPS, axvids[0].fps)
@@ -258,8 +258,8 @@ def create_comparison_video(axvids, initial_cost_matrix):
     cur_vid2_ts = vid2_start_ms
     font = ImageFont.truetype(os.path.join(axv_files.paths['FONTS'], "VollkornRegular.ttf"), size=40)
     
-    key_frames = axv_cm.identify_key_frames(initial_cost_matrix)
-    vid1_len_ms = (float(key_frames[-1][0]) / DATA_HZ) * 1000.0
+    key_frames = axv_cm.identify_key_frames(initial_cost_matrix, data_hz)
+    vid1_len_ms = (float(key_frames[-1][0]) / data_hz) * 1000.0
     axv_prog.StartProgress('Creating video',
                                   'Creating time slip video...',
                                   vid1_len_ms)
@@ -274,7 +274,7 @@ def create_comparison_video(axvids, initial_cost_matrix):
     #                            cv2.VideoWriter_fourcc(*'mp4v'),
     #                            axvid1.fps,
     #                            (1920,1080))
-    kf_ts, kf_poly_coefs = axv_cm.get_key_frame_poly_data(key_frames)
+    kf_ts, kf_poly_coefs = axv_cm.get_key_frame_poly_data(key_frames, data_hz)
 
     num_workers = max(1, os.cpu_count() - 2) # leave one cpu for main thread, one for vid writer
     fb_np = np.empty((num_workers,1080,1920,3),dtype=np.uint8)
@@ -307,7 +307,7 @@ def create_comparison_video(axvids, initial_cost_matrix):
     #success2, frame2 = vid2_player.read()
     (vid2_cur_frame, vid2_ofs_ms, frame2) = vid2_frame_queue.get()
     last_frame_time_slip_ms = 0
-    graph = get_time_slip_graph(axvids[0], key_frames)
+    graph = get_time_slip_graph(axvids[0], key_frames, data_hz)
     frame_num = 0
     while True:
         (vid1_cur_frame, vid1_ofs_ms, frame1) = vid1_frame_queue.get()
@@ -331,7 +331,7 @@ def create_comparison_video(axvids, initial_cost_matrix):
         a_poly_val = poly.polyval(vid1_ofs_ms, kf_poly_coefs[0])
         b_poly_val = poly.polyval(vid1_ofs_ms, kf_poly_coefs[1])
         target_vid2_ofs_ms = (a_poly_val * (1 - percentage)) + (b_poly_val * percentage)
-        while vid2_ofs_ms < (target_vid2_ofs_ms - (0.5 * (1 / DATA_HZ))):
+        while vid2_ofs_ms < (target_vid2_ofs_ms - (0.5 * (1 / data_hz))):
             (vid2_cur_frame, vid2_ofs_ms, frame2) = vid2_frame_queue.get()
         #while success2 and vid2_ofs_ms < target_vid2_ofs_ms:
             #success2, frame2 = vid2_player.read()
@@ -341,8 +341,8 @@ def create_comparison_video(axvids, initial_cost_matrix):
         this_frame_time_slip_ms = target_vid2_ofs_ms - vid1_ofs_ms
         overlay_cm = None
         if OVERLAY_COST_MATRIX_VISUALIZATION:
-            center_x = int((vid1_cur_frame - vid1_start_frame) / (axvids[0].fps / DATA_HZ))
-            center_y = int((vid2_cur_frame - vid2_start_frame) / (axvids[1].fps / DATA_HZ))
+            center_x = int((vid1_cur_frame - vid1_start_frame) / (axvids[0].fps / data_hz))
+            center_y = int((vid2_cur_frame - vid2_start_frame) / (axvids[1].fps / data_hz))
             if center_x < pretty_matrix.shape[0] and center_y < pretty_matrix.shape[1]:
                 pretty_matrix[center_x][center_y] = 255
             win_start_x = min(max(0, center_x - int(COST_MATRIX_OVERLAY_SIZE / 2)),
@@ -379,10 +379,10 @@ def create_comparison_video(axvids, initial_cost_matrix):
     return vid1_ofs_ms / 1000.0
 
 
-def GenerateWithProcessedVids(axvids, cm):
+def GenerateWithProcessedVids(axvids, cm, data_hz):
     if OUTPUT_TIME_SLIP_VIDEO:
         filepath = axv_files.GetPairOutputFile(axvids)
-        length_s = create_comparison_video(axvids, cm)
+        length_s = create_comparison_video(axvids, cm, data_hz)
         if True:
             vid = mpe.VideoFileClip(filepath)
             aud = mpe.AudioFileClip(axv_vid.AudFilename(axvids[0]))

@@ -11,10 +11,12 @@ couple of scripts. I needed to run two of these for this program to work:
 After python is installed (and your shell profile is updated), you should be
 able to run pip, which will install the rest of the dependencies (in a command
 prompt in Windows, or terminal in OSX):
+> cd <path/to/ax_vid> 
 > python3 -m pip install -r requirements.txt
 
-If it complains that python3 isn't a command, the "Update Shell Profile" script
-didn't work properly, and you need to add python to your PATH.
+If it complains that python3 isn't a command, either the "Update Shell Profile"
+script didn't work properly, and you need to add python to your PATH, or you
+need to use 'python' instead of 'python3'
 
 For sounds to be added to the video, you'll need ffmpeg installed:
 https://ffmpeg.org/download.html
